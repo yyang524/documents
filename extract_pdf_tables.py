@@ -428,13 +428,30 @@ def stitch_continuations(tables: list[dict]) -> list[dict]:
     merged: list[dict] = []
     for t in tables:
         prev = merged[-1] if merged else None
-        can_merge = (
-            prev is not None
+        headers_ok = _headers_compatible(prev.get("headers", []) if prev else [],
+                                         t.get("headers", []))
+        consecutive = bool(prev) and t.get("page_number") == _last_page(prev) + 1
+
+        # Two ways to recognise a continuation:
+        #   (a) geometric — the previous table runs off the bottom and this one
+        #       starts at the top of the next page (works for ruled tables);
+        #   (b) caption — both pages carry the same caption base, with the
+        #       continuation marked "(continued)/(concluded)" (works for the
+        #       borderless statistical tables, whose title pushes the data band
+        #       away from the page edge so the geometric flags miss them).
+        edge_continuation = (
+            bool(prev)
             and t.get("continued_from_previous")
             and prev.get("continues_on_next")
             and prev.get("page_number") != t.get("page_number")
-            and _headers_compatible(prev.get("headers", []), t.get("headers", []))
         )
+        caption_continuation = (
+            consecutive
+            and _title_base(prev.get("title")) != ""
+            and _title_base(prev.get("title")) == _title_base(t.get("title"))
+        )
+        can_merge = headers_ok and (edge_continuation or caption_continuation)
+
         if can_merge:
             prev["rows"].extend(t.get("rows", []))
             prev["footnotes"] = prev.get("footnotes", []) + t.get("footnotes", [])
@@ -444,6 +461,22 @@ def stitch_continuations(tables: list[dict]) -> list[dict]:
         else:
             merged.append(t)
     return merged
+
+
+def _last_page(table: dict) -> int:
+    """Highest page a (possibly already-stitched) table covers."""
+    spans = table.get("spans_pages")
+    return spans[-1] if spans else table.get("page_number", 0)
+
+
+def _title_base(title: Optional[str]) -> str:
+    """Normalised caption for matching continuations: drop (continued)/
+    (concluded) markers and trailing footnote superscripts."""
+    if not title:
+        return ""
+    base = re.sub(r"\((?:con(?:tinued|cluded))\)", "", title, flags=re.I)
+    base = re.sub(r"\d+\s*$", "", base)           # trailing footnote digit(s)
+    return re.sub(r"\s+", " ", base).strip().lower()
 
 
 def _headers_compatible(h1: list, h2: list) -> bool:
