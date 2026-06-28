@@ -16,6 +16,12 @@ For each table it captures:
 Outputs, into a user-specified folder (one sub-folder per PDF):
   - one CSV per high-confidence table (with a metadata header block)
   - one combined CSV per PDF (every high-confidence table, long format)
+  - markdown_cards/: one self-contained Markdown "card" per table (YAML
+    front-matter + pipe table + footnotes). This is the LLM-ingestion format:
+    each card is bounded and self-describing, so it survives chunked retrieval
+    and lines up across documents via a stable table_id.
+  - one combined __ALL_TABLES.md per PDF (all cards in one file) — a single
+    knowledge source you can drop into Copilot Studio / a RAG index.
   - one structured JSON manifest per PDF (full Azure-DI-like dump, including
     low-confidence detections)
   - a low_confidence_review/ sub-folder holding detections that look like
@@ -201,6 +207,177 @@ def _context_for_table(page, bbox) -> tuple[Optional[str], list]:
     return _clean_title(title), footnotes
 
 
+# ---------------------------------------------------------------------------
+# Borderless-table reconstruction (no ruling lines, e.g. IMF statistical
+# appendix tables). PyMuPDF's find_tables() keys off vector ruling lines and
+# returns nothing on these, so we rebuild the grid from the PDF's own word
+# coordinates: numeric columns in such tables are right-aligned, so the right
+# edges of number tokens cluster into vertical bands = the columns. Still pure
+# PyMuPDF, still offline, no OCR, no new dependencies.
+# ---------------------------------------------------------------------------
+# Minimum numeric tokens in a row before it helps define column positions, and
+# the minimum number of genuine data rows before a reconstruction is accepted.
+BORDERLESS_MIN_NUMS_PER_ROW = 3
+BORDERLESS_MIN_DATA_ROWS = 4
+BORDERLESS_COL_TOL = 8       # points; merge numeric right-edges within this
+BORDERLESS_ROW_TOL = 3       # points; merge words into one row within this
+BORDERLESS_LABEL_PAD = 30    # points left of the first numeric column = labels
+
+_NUMBER_RE = re.compile(r"^[-(]?[\d,]+\.?\d*\)?%?$")
+
+
+def _is_number_token(text: str) -> bool:
+    """True for a numeric data token like -0.7, 1,234.5, (3.2), 45%, 2026."""
+    t = text.strip().replace("–", "-").replace("−", "-")
+    return bool(re.search(r"\d", t)) and bool(_NUMBER_RE.match(t))
+
+
+def _cluster_1d(values: list, tol: float) -> list:
+    """Cluster sorted 1-D values into groups within `tol`; return group means."""
+    if not values:
+        return []
+    values = sorted(values)
+    groups = [[values[0]]]
+    for v in values[1:]:
+        if v - groups[-1][-1] <= tol:
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    return [sum(g) / len(g) for g in groups]
+
+
+def _group_words_into_rows(words: list) -> list:
+    """Group word tuples into visual rows by vertical centre."""
+    rows, cur, cur_y = [], [], None
+    for w in sorted(words, key=lambda w: ((w[1] + w[3]) / 2, w[0])):
+        yc = (w[1] + w[3]) / 2
+        if cur_y is None or abs(yc - cur_y) <= BORDERLESS_ROW_TOL:
+            cur.append(w)
+            cur_y = yc if cur_y is None else (cur_y + yc) / 2
+        else:
+            rows.append(cur)
+            cur, cur_y = [w], yc
+    if cur:
+        rows.append(cur)
+    return rows
+
+
+_CAPTION_RE = re.compile(r"\b(?:Text\s+)?Table\s+\d+\b|\bFigure\s+\d+\b", re.I)
+
+
+def _find_caption_above(page, table_top: float, max_gap: float = 200) -> Optional[str]:
+    """Scan text lines above a borderless table for a 'Table N. …' caption."""
+    best = None
+    best_y = None
+    for b in page.get_text("blocks"):
+        if (b[6] if len(b) > 6 else 0) != 0:
+            continue
+        for line in (b[4] or "").split("\n"):
+            line = re.sub(r"\s+", " ", line).strip()
+            if not line or not _CAPTION_RE.search(line):
+                continue
+            y = b[1]
+            if y < table_top and (table_top - y) < max_gap:
+                # Keep the caption closest to (just above) the table.
+                if best_y is None or y > best_y:
+                    best, best_y = line, y
+    return best
+
+
+def extract_borderless_tables(page, page_num: int, pdf_filename: str) -> list[dict]:
+    """Reconstruct a borderless table from word coordinates (one per page).
+
+    Returns a single-element list (or empty) — these appendix pages hold one
+    big table each. Prose pages produce no aligned numeric grid and return [].
+    """
+    words = [w for w in page.get_text("words") if w[4].strip()]
+    if not words:
+        return []
+
+    rows = _group_words_into_rows(words)
+
+    # Column positions from right-aligned numeric tokens in number-rich rows.
+    edges = [
+        w[2] for r in rows
+        for w in r
+        if _is_number_token(w[4])
+        and sum(_is_number_token(x[4]) for x in r) >= BORDERLESS_MIN_NUMS_PER_ROW
+    ]
+    cols = _cluster_1d(edges, BORDERLESS_COL_TOL)
+    if len(cols) < MIN_COLUMNS:
+        return []
+    first_col_left = min(cols) - BORDERLESS_LABEL_PAD
+
+    def assign(row) -> tuple:
+        label_parts, cells = [], [""] * len(cols)
+        for w in sorted(row, key=lambda w: w[0]):
+            if _is_number_token(w[4]):
+                ci = min(range(len(cols)), key=lambda i: abs(cols[i] - w[2]))
+                cells[ci] = (cells[ci] + " " + w[4]).strip()
+            elif w[2] < first_col_left:
+                label_parts.append(w[4])
+        return " ".join(label_parts).strip(), cells
+
+    # Build (label, cells) for every row; a "data row" has >=2 filled cells.
+    built = [assign(r) for r in rows]
+    data_idx = [i for i, (_, cells) in enumerate(built)
+                if sum(1 for c in cells if c) >= 2]
+    if len(data_idx) < BORDERLESS_MIN_DATA_ROWS:
+        return []
+
+    # Restrict to the contiguous table band (first..last data row); rows in
+    # between with only a label are kept as section headers.
+    band = built[data_idx[0]: data_idx[-1] + 1]
+    band = [(lbl, cells) for lbl, cells in band if lbl or any(cells)]
+
+    # Header = leading band rows that are year/number-only (empty label).
+    header_cells = []
+    body = band
+    while body and not body[0][0] and any(body[0][1]):
+        header_cells.append(body[0][1])
+        body = body[1:]
+    if header_cells:
+        headers = [""] + [
+            " ".join(hc[c] for hc in header_cells if hc[c]).strip()
+            for c in range(len(cols))
+        ]
+    else:
+        headers = [""] + [f"col{c + 1}" for c in range(len(cols))]
+
+    table_rows = [[lbl] + cells for lbl, cells in body]
+    if not table_rows:
+        return []
+
+    # Bounding box of the reconstructed table, for title/footnote context.
+    band_words = [w for r in rows for w in r]
+    bx0 = min(w[0] for w in band_words)
+    bx1 = max(w[2] for w in band_words)
+    by0 = min((w[1] for r_i in data_idx for w in rows[r_i]), default=0)
+    by1 = max((w[3] for r_i in data_idx for w in rows[r_i]), default=0)
+    title, footnotes = _context_for_table(page, (bx0, by0, bx1, by1))
+    # The data band starts below the caption, so the nearest line above is a
+    # sub-header ("Est.", units). Prefer a real caption line if one sits above.
+    caption = _find_caption_above(page, by0)
+    if caption:
+        title = caption
+
+    page_height = page.rect.height
+    return [{
+        "table_index": 1,
+        "title": title,
+        "context_label": None,
+        "headers": headers,
+        "rows": table_rows,
+        "footnotes": footnotes,
+        "continued_from_previous": by0 < page_height * EDGE_FRACTION,
+        "continues_on_next": by1 > page_height * (1 - EDGE_FRACTION),
+        "page_number": page_num + 1,
+        "source_file": pdf_filename,
+        "low_confidence": _is_low_confidence(headers, table_rows),
+        "detection": "borderless",
+    }]
+
+
 def extract_tables_from_page(page, page_num: int, pdf_filename: str) -> list[dict]:
     """Extract every table on a page as a structured dict."""
     finder = page.find_tables()
@@ -228,7 +405,13 @@ def extract_tables_from_page(page, page_num: int, pdf_filename: str) -> list[dic
             "page_number": page_num + 1,
             "source_file": pdf_filename,
             "low_confidence": _is_low_confidence(headers, rows),
+            "detection": "ruled",
         })
+
+    # Borderless fallback: if the line-based detector found nothing, the page
+    # may still hold a borderless table (e.g. IMF statistical appendix).
+    if not results:
+        results = extract_borderless_tables(page, page_num, pdf_filename)
 
     return results
 
@@ -307,6 +490,103 @@ def write_table_csv(table: dict, output_dir: Path, global_index: int) -> str:
         for row in rows:
             writer.writerow(row)
 
+    return str(filepath)
+
+
+def _slugify(text: str) -> str:
+    """Stable id from a title, for matching the same table across two documents."""
+    text = re.sub(r"\s+", " ", (text or "")).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text[:80] or "table"
+
+
+def _units_from_title(title: Optional[str]) -> str:
+    """Pull a units hint out of a title, e.g. '(Percent of GDP)'."""
+    if not title:
+        return ""
+    m = re.search(r"\(([^)]*(?:percent|%|gdp|usd|eur|index|growth|ratio|"
+                  r"thousands|millions|billions)[^)]*)\)", title, re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _escape_md(cell: str) -> str:
+    return str(cell).replace("|", "\\|").strip()
+
+
+def _table_as_markdown(table: dict) -> str:
+    """Render just the pipe-table body (headers + rows) as Markdown."""
+    headers = table.get("headers", [])
+    rows = table.get("rows", [])
+    width = max([len(headers)] + [len(r) for r in rows]) if (headers or rows) else 0
+    if width == 0:
+        return ""
+    head = headers + [""] * (width - len(headers))
+    lines = [
+        "| " + " | ".join(_escape_md(c) for c in head) + " |",
+        "| " + " | ".join(["---"] * width) + " |",
+    ]
+    for r in rows:
+        r = list(r) + [""] * (width - len(r))
+        lines.append("| " + " | ".join(_escape_md(c) for c in r) + " |")
+    return "\n".join(lines)
+
+
+def _table_card_markdown(table: dict, global_index: int) -> str:
+    """One self-contained Markdown 'card': YAML front-matter + table + footnotes.
+
+    This is the LLM-ingestion unit for chunked, cross-document comparison: each
+    card is bounded and self-describing, so it survives retrieval out of order.
+    """
+    title = table.get("title") or f"Table {global_index}"
+    spans = table.get("spans_pages")
+    page_str = ", ".join(map(str, spans)) if spans else str(table.get("page_number", ""))
+    footnotes = table.get("footnotes", [])
+
+    fm = ["---"]
+    fm.append(f"table_id: {_slugify(title)}")
+    fm.append(f"source_file: {table.get('source_file', '')}")
+    fm.append(f"page: {page_str}")
+    fm.append(f"global_table_index: {global_index}")
+    fm.append(f'title: "{title.replace(chr(34), chr(39))}"')
+    units = _units_from_title(title)
+    if units:
+        fm.append(f'units: "{units}"')
+    fm.append(f"columns: {len(table.get('headers', []))}")
+    fm.append(f"rows: {len(table.get('rows', []))}")
+    if footnotes:
+        fm.append("footnotes:")
+        for fn in footnotes:
+            fm.append(f'  - "{fn.replace(chr(34), chr(39))}"')
+    fm.append("---")
+
+    body = [f"\n# {title}\n", _table_as_markdown(table)]
+    if footnotes:
+        body.append("\n**Footnotes:**")
+        body.extend(f"- {fn}" for fn in footnotes)
+    return "\n".join(fm) + "\n" + "\n".join(body) + "\n"
+
+
+def write_table_markdown(table: dict, output_dir: Path, global_index: int) -> str:
+    """Write a single table as a self-contained Markdown card (LLM-ready)."""
+    title = table.get("title") or f"table_{global_index}"
+    page = table.get("page_number", 0)
+    filename = f"p{page:04d}_t{global_index:04d}_{sanitize_filename(title)}.md"
+    filepath = output_dir / filename
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(_table_card_markdown(table, global_index))
+    return str(filepath)
+
+
+def write_combined_markdown(all_tables: list[dict], output_dir: Path, pdf_stem: str) -> str:
+    """Write all tables into one Markdown file — a single Copilot knowledge source."""
+    filepath = output_dir / f"{pdf_stem}__ALL_TABLES.md"
+    parts = [f"# Tables extracted from {pdf_stem}\n",
+             f"_{len(all_tables)} table(s)._\n"]
+    for g_idx, table in enumerate(all_tables, 1):
+        parts.append("\n---\n")
+        parts.append(_table_card_markdown(table, g_idx))
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
     return str(filepath)
 
 
@@ -405,8 +685,15 @@ def process_pdf(pdf_path: Path, output_root: Path) -> int:
 
     all_tables = stitch_continuations(real)
 
+    # Markdown "cards" are the LLM-ingestion format (see write_combined_markdown);
+    # kept in their own subfolder so the CSV directory stays human/Excel-focused.
+    cards_dir = out_dir / "markdown_cards"
+    if all_tables:
+        cards_dir.mkdir(parents=True, exist_ok=True)
+
     for g_idx, table in enumerate(all_tables, 1):
         csv_path = write_table_csv(table, out_dir, g_idx)
+        write_table_markdown(table, cards_dir, g_idx)
         print(f"    -> {Path(csv_path).name}")
 
     # Low-confidence detections are still written, just kept separate for review.
@@ -418,6 +705,7 @@ def process_pdf(pdf_path: Path, output_root: Path) -> int:
 
     if all_tables:
         print(f"\n  Combined : {write_combined_csv(all_tables, out_dir, pdf_stem)}")
+        print(f"  Markdown : {write_combined_markdown(all_tables, out_dir, pdf_stem)}")
         print(f"  Manifest : {write_manifest(all_tables, out_dir, pdf_stem, low)}")
         print(f"  Tables   : {len(all_tables)} data table(s) written "
               f"(from {len(real)} high-confidence detections)")
