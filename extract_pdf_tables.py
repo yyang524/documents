@@ -1,48 +1,38 @@
 #!/usr/bin/env python3
 """
-PDF Table Extractor — powered by Claude Vision (claude-opus-4-8)
+PDF Table Extractor — fully offline, no API key required.
 
-Extracts ALL tables from very long PDF documents — including tables pasted as
-images/screenshots that text-based parsers (pdfplumber, camelot) cannot see — by
-rendering every page as an image and using Claude's multimodal understanding.
+Extracts ALL text-searchable tables from PDF documents (including very long
+ones) using PyMuPDF's built-in table finder, captures each table's title and
+footnotes from the surrounding text, stitches tables that span page breaks,
+and exports everything to CSV — Azure Document Intelligence style.
 
-For each table it captures, Azure Document Intelligence style:
-  - title / caption
-  - footnotes, source lines, and notes
-  - section / context label
+For each table it captures:
+  - title / caption (text directly above the table)
+  - footnotes / source lines (text directly below the table)
   - column headers and all data rows (merged cells preserved)
   - page number, table index, and cross-page continuation links
 
-Outputs, into a user-specified folder:
+Outputs, into a user-specified folder (one sub-folder per PDF):
   - one CSV per table (with a metadata header block)
   - one combined CSV per PDF (every table, long format)
   - one structured JSON manifest per PDF (full Azure-DI-like dump)
 
 Dependencies:
-  - PyMuPDF (the ONLY third-party package). Install without admin rights:
+  - PyMuPDF only. Install without admin rights:
         python -m pip install --user pymupdf
-  - The Claude API is called via Python's built-in urllib, so the anthropic
-    SDK is NOT required.
+  - No network, no API key, no OCR. Runs entirely offline.
+  - Works on text-searchable PDFs (tables made of real, selectable text).
 
 Usage:
-    set ANTHROPIC_API_KEY (or you'll be prompted), then:
-        python extract_pdf_tables.py [PDF_PATH_OR_FOLDER] [OUTPUT_FOLDER]
-    Linux/macOS:  export ANTHROPIC_API_KEY=sk-ant-...
-    Windows CMD:  set ANTHROPIC_API_KEY=sk-ant-...
-
+    python extract_pdf_tables.py [PDF_PATH_OR_FOLDER] [OUTPUT_FOLDER]
 If the two paths are omitted, the script prompts for them interactively.
-A corporate HTTPS proxy is honored automatically via the HTTPS_PROXY env var.
 """
 
-import os
 import sys
 import json
-import time
-import base64
 import csv
 import re
-import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -54,247 +44,142 @@ except ImportError:
         "    python -m pip install --user pymupdf"
     )
 
+if not hasattr(fitz.Page, "find_tables"):
+    sys.exit(
+        "Your PyMuPDF is too old for table detection. Upgrade with:\n"
+        "    python -m pip install --user --upgrade pymupdf"
+    )
 
-MODEL = "claude-opus-4-8"
-API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
-REQUEST_TIMEOUT = 600  # seconds; dense pages with extended thinking can be slow
-MAX_TOKENS = 20000
 
-# Claude's vision pipeline downsamples images to roughly 1.15 megapixels /
-# ~1568 px on the long edge. Rendering far above that just wastes tokens and
-# time without improving what the model actually sees. We target a long edge a
-# touch above that so the page is crisp, then let Claude downsample cleanly.
-TARGET_LONG_EDGE_PX = 1540
-MIN_DPI = 110
-MAX_DPI = 240
-
-MAX_RETRIES = 5
-RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 529}
-
-# ---------------------------------------------------------------------------
-# Structured-output tool schema. Asking Claude to emit data through this tool
-# yields well-formed structure (no brittle regex/JSON-from-prose parsing).
-# ---------------------------------------------------------------------------
-RECORD_TOOL = {
-    "name": "record_tables",
-    "description": (
-        "Record every table found on the page as structured data. Call this "
-        "exactly once per page, passing all tables found (or an empty list if "
-        "there are none)."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "tables": {
-                "type": "array",
-                "description": "All tables found on this page, in reading order.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "table_index": {
-                            "type": "integer",
-                            "description": "1-based order of appearance on this page.",
-                        },
-                        "title": {
-                            "type": ["string", "null"],
-                            "description": "Table title/caption, e.g. 'Table 1: Revenue'. null if none.",
-                        },
-                        "context_label": {
-                            "type": ["string", "null"],
-                            "description": "Section heading that contextualizes the table, e.g. '3.2 Results'. null if none.",
-                        },
-                        "headers": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Column header names, in order. Empty if the table has no header row.",
-                        },
-                        "rows": {
-                            "type": "array",
-                            "items": {"type": "array", "items": {"type": "string"}},
-                            "description": "Data rows; each is a list of cell values in column order. Repeat values across merged/spanned cells. Use '' for empty cells.",
-                        },
-                        "footnotes": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Footnotes, notes, and source lines below the table.",
-                        },
-                        "continued_from_previous": {
-                            "type": "boolean",
-                            "description": "True if this table appears to continue from the previous page (e.g. starts mid-data with no/partial header).",
-                        },
-                        "continues_on_next": {
-                            "type": "boolean",
-                            "description": "True if this table appears to continue onto the next page (e.g. runs to the bottom edge, no closing/total row).",
-                        },
-                    },
-                    "required": [
-                        "table_index", "title", "context_label", "headers",
-                        "rows", "footnotes", "continued_from_previous",
-                        "continues_on_next",
-                    ],
-                },
-            }
-        },
-        "required": ["tables"],
-    },
-}
-
-EXTRACTION_PROMPT = """You are an expert document-analysis system specializing in table extraction, comparable to Azure Document Intelligence.
-
-Examine this PDF page image and extract EVERY table present. Critically, this includes tables that are embedded as images, screenshots, or scans — transcribe their contents exactly as if they were native tables.
-
-For each table, capture:
-- title/caption (text directly above the table)
-- context_label (the section heading it sits under)
-- headers (column names, in order)
-- rows (every data row; values exactly as shown — preserve commas, decimals, %, currency symbols, units, parentheses for negatives, and footnote markers)
-- footnotes (notes/source lines below the table)
-- continuation flags (whether the table continues from the previous page or onto the next)
-
-Rules for maximum accuracy:
-- Do NOT omit, summarize, or reorder any row or column.
-- For merged/spanned cells, repeat the value in each position it spans so every row has the same number of cells as the header.
-- Keep empty cells as empty strings rather than dropping them.
-- Distinguish genuine tables from layout columns, code blocks, and figures — extract only real tabular data.
-- If a header row is repeated mid-table (page break artifact), keep the data rows but do not duplicate the header.
-
-Report ALL tables by calling the record_tables tool. If there are no tables on this page, call it with an empty list."""
+# How close (in points) surrounding text must be to count as a title/footnote.
+TITLE_MAX_GAP = 80
+FOOTNOTE_MAX_GAP = 70
+# Fraction of page height used to flag a table as touching the top/bottom edge
+# (i.e. a likely page-spanning continuation).
+EDGE_FRACTION = 0.14
 
 
 # ---------------------------------------------------------------------------
-# Claude API (raw HTTPS via stdlib urllib — no SDK dependency)
+# Table extraction (PyMuPDF, offline)
 # ---------------------------------------------------------------------------
-def call_claude(api_key: str, content_blocks: list) -> dict:
-    """POST one Messages request and return the parsed response JSON.
-
-    Retries transient errors (429/5xx/connection) with exponential backoff.
-    """
-    body = json.dumps({
-        "model": MODEL,
-        "max_tokens": MAX_TOKENS,
-        "thinking": {"type": "adaptive"},
-        "tools": [RECORD_TOOL],
-        "messages": [{"role": "user", "content": content_blocks}],
-    }).encode("utf-8")
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-
-    last_err: Optional[str] = None
-    for attempt in range(MAX_RETRIES):
-        req = urllib.request.Request(API_URL, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")
-            last_err = f"HTTP {e.code}: {detail[:300]}"
-            if e.code not in RETRYABLE_STATUS or attempt == MAX_RETRIES - 1:
-                raise RuntimeError(last_err)
-        except (urllib.error.URLError, TimeoutError) as e:
-            last_err = f"{type(e).__name__}: {e}"
-            if attempt == MAX_RETRIES - 1:
-                raise RuntimeError(last_err)
-        wait = 2 ** attempt
-        print(f"    [retry {attempt + 1}/{MAX_RETRIES}] {last_err}; waiting {wait}s")
-        time.sleep(wait)
-
-    raise RuntimeError(last_err or "unknown error")
+def _clean_cell(value) -> str:
+    """Normalize a single cell value."""
+    if value is None:
+        return ""
+    text = str(value).replace("\n", " ").replace("\r", " ")
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def compute_dpi(page) -> float:
-    """Pick a render DPI so the page's long edge lands near TARGET_LONG_EDGE_PX."""
-    rect = page.rect
-    long_edge_pts = max(rect.width, rect.height)  # points (1/72 inch)
-    if long_edge_pts <= 0:
-        return 150.0
-    dpi = TARGET_LONG_EDGE_PX * 72.0 / long_edge_pts
-    return max(MIN_DPI, min(MAX_DPI, dpi))
+def _normalize_rows(rows: list) -> list:
+    """Clean all cells and pad every row to the same width."""
+    cleaned = [[_clean_cell(c) for c in row] for row in rows]
+    if not cleaned:
+        return cleaned
+    width = max(len(r) for r in cleaned)
+    return [r + [""] * (width - len(r)) for r in cleaned]
 
 
-def pdf_page_to_base64(page) -> str:
-    """Render an already-open PDF page to a base64-encoded PNG image."""
-    dpi = compute_dpi(page)
-    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img_bytes = pix.tobytes("png")
-    return base64.standard_b64encode(img_bytes).decode("utf-8")
+def _split_header(table) -> tuple[list, list]:
+    """Return (headers, data_rows) for a PyMuPDF table object."""
+    extracted = _normalize_rows(table.extract())
+    if not extracted:
+        return [], []
 
+    header = getattr(table, "header", None)
+    names = getattr(header, "names", None) if header else None
+    external = getattr(header, "external", False) if header else False
 
-def extract_tables_from_page(
-    api_key: str,
-    image_b64: str,
-    page_num: int,
-    pdf_filename: str,
-) -> list[dict]:
-    """Send one page image to Claude and return the list of structured tables."""
-    content_blocks = [
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": image_b64,
-            },
-        },
-        {"type": "text", "text": EXTRACTION_PROMPT},
-    ]
-
-    try:
-        response = call_claude(api_key, content_blocks)
-    except RuntimeError as e:
-        print(f"    [error] page {page_num + 1} failed: {e}")
-        return []
-
-    if response.get("stop_reason") == "refusal":
-        print(f"    [warn] page {page_num + 1}: request was declined by safety filter; skipping.")
-        return []
-
-    return _tables_from_response(response, page_num, pdf_filename)
-
-
-def _tables_from_response(response: dict, page_num: int, pdf_filename: str) -> list[dict]:
-    """Pull the record_tables tool input out of a response payload."""
-    tables: list[dict] = []
-    content = response.get("content", [])
-    for block in content:
-        if block.get("type") == "tool_use" and block.get("name") == "record_tables":
-            tables = list(block.get("input", {}).get("tables", []))
-            break
+    if external and names and any(n for n in names):
+        headers = _normalize_rows([list(names)])[0]
+        rows = extracted
     else:
-        # Fallback: model answered in prose JSON instead of calling the tool.
-        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-        tables = _salvage_json_tables(text)
+        headers = extracted[0]
+        rows = extracted[1:]
 
-    for t in tables:
-        t["page_number"] = page_num + 1
-        t["source_file"] = pdf_filename
-    return tables
-
-
-def _salvage_json_tables(text: str) -> list[dict]:
-    """Best-effort parse of a JSON tables payload embedded in prose."""
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    candidate = m.group(1) if m else text
-    for start_char, end_char in (("{", "}"), ("[", "]")):
-        s = candidate.find(start_char)
-        e = candidate.rfind(end_char)
-        if s != -1 and e > s:
-            try:
-                data = json.loads(candidate[s : e + 1])
-                if isinstance(data, dict):
-                    return list(data.get("tables", []))
-                if isinstance(data, list):
-                    return data
-            except json.JSONDecodeError:
-                continue
-    return []
+    # Pad headers to match the widest data row.
+    width = max([len(headers)] + [len(r) for r in rows]) if rows else len(headers)
+    headers = headers + [""] * (width - len(headers))
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    return headers, rows
 
 
+def _context_for_table(page, bbox) -> tuple[Optional[str], list]:
+    """Find the title (text just above) and footnotes (text just below) a table."""
+    tx0, ty0, tx1, ty1 = bbox
+
+    text_blocks = []
+    for b in page.get_text("blocks"):
+        # block tuple: (x0, y0, x1, y1, text, block_no, block_type)
+        block_type = b[6] if len(b) > 6 else 0
+        if block_type != 0:
+            continue
+        text = (b[4] or "").strip()
+        if text:
+            text_blocks.append((b[0], b[1], b[2], b[3], text))
+
+    def overlaps_x(x0: float, x1: float) -> bool:
+        return x0 < tx1 and x1 > tx0
+
+    # Title: the closest text block ending just above the table top.
+    title = None
+    best_gap = None
+    for x0, y0, x1, y1, text in text_blocks:
+        if y1 <= ty0 + 2 and overlaps_x(x0, x1):
+            gap = ty0 - y1
+            if 0 <= gap < TITLE_MAX_GAP and (best_gap is None or gap < best_gap):
+                best_gap = gap
+                title = re.sub(r"\s+", " ", text).strip()
+
+    # Footnotes: text blocks starting just below the table bottom.
+    below = sorted(
+        (y0, text)
+        for x0, y0, x1, y1, text in text_blocks
+        if y0 >= ty1 - 2 and overlaps_x(x0, x1) and 0 <= (y0 - ty1) < FOOTNOTE_MAX_GAP
+    )
+    footnotes = []
+    for _, text in below[:4]:
+        for line in text.split("\n"):
+            line = line.strip()
+            if line:
+                footnotes.append(line)
+
+    return title, footnotes
+
+
+def extract_tables_from_page(page, page_num: int, pdf_filename: str) -> list[dict]:
+    """Extract every table on a page as a structured dict."""
+    finder = page.find_tables()
+    page_height = page.rect.height
+    results = []
+
+    for idx, table in enumerate(finder.tables, 1):
+        headers, rows = _split_header(table)
+        if not headers and not rows:
+            continue
+
+        title, footnotes = _context_for_table(page, table.bbox)
+        ty0, ty1 = table.bbox[1], table.bbox[3]
+
+        results.append({
+            "table_index": idx,
+            "title": title,
+            "context_label": None,
+            "headers": headers,
+            "rows": rows,
+            "footnotes": footnotes,
+            # Flag tables touching the page edges as possible continuations.
+            "continued_from_previous": ty0 < page_height * EDGE_FRACTION,
+            "continues_on_next": ty1 > page_height * (1 - EDGE_FRACTION),
+            "page_number": page_num + 1,
+            "source_file": pdf_filename,
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Cross-page stitching
+# ---------------------------------------------------------------------------
 def stitch_continuations(tables: list[dict]) -> list[dict]:
     """Merge tables that span page breaks into single tables.
 
@@ -308,6 +193,7 @@ def stitch_continuations(tables: list[dict]) -> list[dict]:
             prev is not None
             and t.get("continued_from_previous")
             and prev.get("continues_on_next")
+            and prev.get("page_number") != t.get("page_number")
             and _headers_compatible(prev.get("headers", []), t.get("headers", []))
         )
         if can_merge:
@@ -330,6 +216,9 @@ def _headers_compatible(h1: list, h2: list) -> bool:
     return norm(h1) == norm(h2)
 
 
+# ---------------------------------------------------------------------------
+# Output writers
+# ---------------------------------------------------------------------------
 def sanitize_filename(name: str, max_len: int = 60) -> str:
     name = re.sub(r'[\\/*?:"<>|]', "_", str(name))
     name = re.sub(r"\s+", "_", name.strip())
@@ -424,7 +313,10 @@ def write_manifest(all_tables: list[dict], output_dir: Path, pdf_stem: str) -> s
     return str(filepath)
 
 
-def process_pdf(pdf_path: Path, output_root: Path, api_key: str) -> int:
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+def process_pdf(pdf_path: Path, output_root: Path) -> int:
     """Extract all tables from one PDF. Returns the number of tables written."""
     pdf_filename = pdf_path.name
     pdf_stem = pdf_path.stem
@@ -440,13 +332,11 @@ def process_pdf(pdf_path: Path, output_root: Path, api_key: str) -> int:
     page_tables: list[dict] = []
     for page_num in range(total_pages):
         print(f"  Page {page_num + 1}/{total_pages}...", end=" ", flush=True)
-        image_b64 = pdf_page_to_base64(doc[page_num])
-        tables = extract_tables_from_page(api_key, image_b64, page_num, pdf_filename)
+        tables = extract_tables_from_page(doc[page_num], page_num, pdf_filename)
         print(f"found {len(tables)} table(s)" if tables else "no tables")
         page_tables.extend(tables)
     doc.close()
 
-    # Stitch cross-page tables, then persist.
     all_tables = stitch_continuations(page_tables)
 
     for g_idx, table in enumerate(all_tables, 1):
@@ -494,18 +384,13 @@ def resolve_inputs() -> tuple[list[Path], Path]:
 
 
 def main():
-    print("PDF Table Extractor — powered by Claude Vision")
+    print("PDF Table Extractor — offline (PyMuPDF, no API key)")
     print("=" * 60)
 
     pdf_files, output_dir = resolve_inputs()
     print(f"Output folder: {output_dir.resolve()}")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or input(
-        "Enter your Anthropic API key: ").strip()
-    if not api_key:
-        sys.exit("Error: no API key provided.")
-
-    total = sum(process_pdf(p, output_dir, api_key) for p in pdf_files)
+    total = sum(process_pdf(p, output_dir) for p in pdf_files)
 
     print(f"\n{'=' * 60}\nExtraction complete.")
     print(f"Total tables extracted: {total}")
