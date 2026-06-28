@@ -14,9 +14,17 @@ For each table it captures:
   - page number, table index, and cross-page continuation links
 
 Outputs, into a user-specified folder (one sub-folder per PDF):
-  - one CSV per table (with a metadata header block)
-  - one combined CSV per PDF (every table, long format)
-  - one structured JSON manifest per PDF (full Azure-DI-like dump)
+  - one CSV per high-confidence table (with a metadata header block)
+  - one combined CSV per PDF (every high-confidence table, long format)
+  - one structured JSON manifest per PDF (full Azure-DI-like dump, including
+    low-confidence detections)
+  - a low_confidence_review/ sub-folder holding detections that look like
+    charts/figures rather than data tables — written, not discarded, so you
+    can review them. Nothing is ever dropped.
+
+Note: on chart-heavy PDFs the geometric detector can mistake a chart's axis
+labels/legend for a table. The quality gate routes those to the review folder
+while keeping large, genuine (even sparse) tables in the main output.
 
 Dependencies:
   - PyMuPDF only. Install without admin rights:
@@ -57,6 +65,16 @@ FOOTNOTE_MAX_GAP = 70
 # Fraction of page height used to flag a table as touching the top/bottom edge
 # (i.e. a likely page-spanning continuation).
 EDGE_FRACTION = 0.14
+
+# Quality gate: chart-heavy PDFs make PyMuPDF report charts (their axis labels
+# and legends) as tiny/empty "tables". The gate is deliberately CONSERVATIVE —
+# it only flags detections that carry almost no tabular content, so large but
+# sparse real tables (wide assessment matrices, etc.) are never dropped.
+# Flagged detections are still written, into a low_confidence_review/ subfolder
+# and the JSON manifest, so nothing is lost. Loosen by lowering MIN_NONEMPTY_CELLS.
+MIN_COLUMNS = 2
+MIN_DATA_ROWS = 1
+MIN_NONEMPTY_CELLS = 8      # total non-empty cells across header + data rows
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +121,43 @@ def _split_header(table) -> tuple[list, list]:
     return headers, rows
 
 
+def _is_low_confidence(headers: list, rows: list) -> bool:
+    """Heuristic: True only if a detection carries almost no tabular content
+    (the signature of a chart/figure picked up by the geometric detector).
+    Large-but-sparse real tables are intentionally NOT flagged."""
+    grid = ([headers] if headers else []) + rows
+    if not grid:
+        return True
+    n_cols = max(len(r) for r in grid)
+    n_filled = sum(1 for r in grid for c in r if c)
+    if n_cols < MIN_COLUMNS or len(rows) < MIN_DATA_ROWS:
+        return True
+    if n_filled < MIN_NONEMPTY_CELLS:
+        return True
+    return False
+
+
+def _is_chart_label(text: str) -> bool:
+    """True for stray chart axis/legend text that should not be a title/footnote."""
+    t = text.strip()
+    if re.fullmatch(r"\d{4}", t):                 # a bare year, e.g. 2026
+        return True
+    if re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?%?", t):  # a bare number/percent
+        return True
+    if re.fullmatch(r"[A-Z]{2,4}", t):            # a country/series code, e.g. ITA
+        return True
+    return False
+
+
+def _clean_title(title: Optional[str]) -> Optional[str]:
+    """Drop running-header noise (e.g. a lone all-caps word like 'GERMANY')."""
+    if not title:
+        return None
+    if re.fullmatch(r"[A-Z][A-Z .,&'-]{1,40}", title) and " " not in title.strip():
+        return None
+    return title
+
+
 def _context_for_table(page, bbox) -> tuple[Optional[str], list]:
     """Find the title (text just above) and footnotes (text just below) a table."""
     tx0, ty0, tx1, ty1 = bbox
@@ -140,10 +195,10 @@ def _context_for_table(page, bbox) -> tuple[Optional[str], list]:
     for _, text in below[:4]:
         for line in text.split("\n"):
             line = line.strip()
-            if line:
+            if line and not _is_chart_label(line):
                 footnotes.append(line)
 
-    return title, footnotes
+    return _clean_title(title), footnotes
 
 
 def extract_tables_from_page(page, page_num: int, pdf_filename: str) -> list[dict]:
@@ -172,6 +227,7 @@ def extract_tables_from_page(page, page_num: int, pdf_filename: str) -> list[dic
             "continues_on_next": ty1 > page_height * (1 - EDGE_FRACTION),
             "page_number": page_num + 1,
             "source_file": pdf_filename,
+            "low_confidence": _is_low_confidence(headers, rows),
         })
 
     return results
@@ -284,28 +340,34 @@ def write_combined_csv(all_tables: list[dict], output_dir: Path, pdf_stem: str) 
     return str(filepath)
 
 
-def write_manifest(all_tables: list[dict], output_dir: Path, pdf_stem: str) -> str:
+def _manifest_entry(t: dict, index: int) -> dict:
+    return {
+        "global_table_index": index,
+        "page_number": t.get("page_number"),
+        "spans_pages": t.get("spans_pages"),
+        "title": t.get("title"),
+        "context_label": t.get("context_label"),
+        "footnotes": t.get("footnotes", []),
+        "headers": t.get("headers", []),
+        "row_count": len(t.get("rows", [])),
+        "column_count": len(t.get("headers", [])) or (
+            len(t["rows"][0]) if t.get("rows") else 0
+        ),
+        "rows": t.get("rows", []),
+    }
+
+
+def write_manifest(all_tables: list[dict], output_dir: Path, pdf_stem: str,
+                   low_confidence: Optional[list[dict]] = None) -> str:
     """Write the full structured extraction as JSON (Azure-DI-like manifest)."""
     filepath = output_dir / f"{pdf_stem}__manifest.json"
     manifest = {
         "source": pdf_stem,
         "table_count": len(all_tables),
-        "tables": [
-            {
-                "global_table_index": i + 1,
-                "page_number": t.get("page_number"),
-                "spans_pages": t.get("spans_pages"),
-                "title": t.get("title"),
-                "context_label": t.get("context_label"),
-                "footnotes": t.get("footnotes", []),
-                "headers": t.get("headers", []),
-                "row_count": len(t.get("rows", [])),
-                "column_count": len(t.get("headers", [])) or (
-                    len(t["rows"][0]) if t.get("rows") else 0
-                ),
-                "rows": t.get("rows", []),
-            }
-            for i, t in enumerate(all_tables)
+        "tables": [_manifest_entry(t, i + 1) for i, t in enumerate(all_tables)],
+        "low_confidence_count": len(low_confidence or []),
+        "low_confidence_tables": [
+            _manifest_entry(t, i + 1) for i, t in enumerate(low_confidence or [])
         ],
     }
     with open(filepath, "w", encoding="utf-8") as f:
@@ -337,19 +399,35 @@ def process_pdf(pdf_path: Path, output_root: Path) -> int:
         page_tables.extend(tables)
     doc.close()
 
-    all_tables = stitch_continuations(page_tables)
+    # Separate genuine data tables from likely chart/figure noise.
+    real = [t for t in page_tables if not t.get("low_confidence")]
+    low = [t for t in page_tables if t.get("low_confidence")]
+
+    all_tables = stitch_continuations(real)
 
     for g_idx, table in enumerate(all_tables, 1):
         csv_path = write_table_csv(table, out_dir, g_idx)
         print(f"    -> {Path(csv_path).name}")
 
+    # Low-confidence detections are still written, just kept separate for review.
+    if low:
+        review_dir = out_dir / "low_confidence_review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        for g_idx, table in enumerate(low, 1):
+            write_table_csv(table, review_dir, g_idx)
+
     if all_tables:
         print(f"\n  Combined : {write_combined_csv(all_tables, out_dir, pdf_stem)}")
-        print(f"  Manifest : {write_manifest(all_tables, out_dir, pdf_stem)}")
-        print(f"  Tables   : {len(all_tables)} "
-              f"(from {len(page_tables)} page-level detections)")
+        print(f"  Manifest : {write_manifest(all_tables, out_dir, pdf_stem, low)}")
+        print(f"  Tables   : {len(all_tables)} data table(s) written "
+              f"(from {len(real)} high-confidence detections)")
+        if low:
+            print(f"  Review   : {len(low)} low-confidence detection(s) "
+                  f"(likely charts/figures) in low_confidence_review/")
     else:
-        print(f"\n  No tables found in {pdf_filename}")
+        print(f"\n  No high-confidence data tables found in {pdf_filename}"
+              + (f"; {len(low)} low-confidence detections in low_confidence_review/"
+                 if low else ""))
 
     return len(all_tables)
 
