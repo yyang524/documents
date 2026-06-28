@@ -18,12 +18,20 @@ Outputs, into a user-specified folder:
   - one combined CSV per PDF (every table, long format)
   - one structured JSON manifest per PDF (full Azure-DI-like dump)
 
+Dependencies:
+  - PyMuPDF (the ONLY third-party package). Install without admin rights:
+        python -m pip install --user pymupdf
+  - The Claude API is called via Python's built-in urllib, so the anthropic
+    SDK is NOT required.
+
 Usage:
-    pip install anthropic pymupdf
-    export ANTHROPIC_API_KEY=sk-ant-...
-    python extract_pdf_tables.py [PDF_PATH_OR_FOLDER] [OUTPUT_FOLDER]
+    set ANTHROPIC_API_KEY (or you'll be prompted), then:
+        python extract_pdf_tables.py [PDF_PATH_OR_FOLDER] [OUTPUT_FOLDER]
+    Linux/macOS:  export ANTHROPIC_API_KEY=sk-ant-...
+    Windows CMD:  set ANTHROPIC_API_KEY=sk-ant-...
 
 If the two paths are omitted, the script prompts for them interactively.
+A corporate HTTPS proxy is honored automatically via the HTTPS_PROXY env var.
 """
 
 import os
@@ -33,20 +41,25 @@ import time
 import base64
 import csv
 import re
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
-
-import anthropic
 
 try:
     import fitz  # pymupdf
 except ImportError:
-    print("Installing pymupdf (required for PDF rendering)...")
-    os.system(f"{sys.executable} -m pip install pymupdf -q")
-    import fitz
+    sys.exit(
+        "PyMuPDF is required. Install it (no admin needed) with:\n"
+        "    python -m pip install --user pymupdf"
+    )
 
 
 MODEL = "claude-opus-4-8"
+API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+REQUEST_TIMEOUT = 600  # seconds; dense pages with extended thinking can be slow
+MAX_TOKENS = 20000
 
 # Claude's vision pipeline downsamples images to roughly 1.15 megapixels /
 # ~1568 px on the long edge. Rendering far above that just wastes tokens and
@@ -57,10 +70,11 @@ MIN_DPI = 110
 MAX_DPI = 240
 
 MAX_RETRIES = 5
+RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 529}
 
 # ---------------------------------------------------------------------------
-# Structured-output tool schema. Forcing Claude to emit data through this tool
-# guarantees well-formed structure (no brittle regex/JSON-from-prose parsing).
+# Structured-output tool schema. Asking Claude to emit data through this tool
+# yields well-formed structure (no brittle regex/JSON-from-prose parsing).
 # ---------------------------------------------------------------------------
 RECORD_TOOL = {
     "name": "record_tables",
@@ -148,6 +162,50 @@ Rules for maximum accuracy:
 Report ALL tables by calling the record_tables tool. If there are no tables on this page, call it with an empty list."""
 
 
+# ---------------------------------------------------------------------------
+# Claude API (raw HTTPS via stdlib urllib — no SDK dependency)
+# ---------------------------------------------------------------------------
+def call_claude(api_key: str, content_blocks: list) -> dict:
+    """POST one Messages request and return the parsed response JSON.
+
+    Retries transient errors (429/5xx/connection) with exponential backoff.
+    """
+    body = json.dumps({
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "thinking": {"type": "adaptive"},
+        "tools": [RECORD_TOOL],
+        "messages": [{"role": "user", "content": content_blocks}],
+    }).encode("utf-8")
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+
+    last_err: Optional[str] = None
+    for attempt in range(MAX_RETRIES):
+        req = urllib.request.Request(API_URL, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            last_err = f"HTTP {e.code}: {detail[:300]}"
+            if e.code not in RETRYABLE_STATUS or attempt == MAX_RETRIES - 1:
+                raise RuntimeError(last_err)
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt == MAX_RETRIES - 1:
+                raise RuntimeError(last_err)
+        wait = 2 ** attempt
+        print(f"    [retry {attempt + 1}/{MAX_RETRIES}] {last_err}; waiting {wait}s")
+        time.sleep(wait)
+
+    raise RuntimeError(last_err or "unknown error")
+
+
 def compute_dpi(page) -> float:
     """Pick a render DPI so the page's long edge lands near TARGET_LONG_EDGE_PX."""
     rect = page.rect
@@ -168,66 +226,48 @@ def pdf_page_to_base64(page) -> str:
 
 
 def extract_tables_from_page(
-    client: anthropic.Anthropic,
+    api_key: str,
     image_b64: str,
     page_num: int,
     pdf_filename: str,
 ) -> list[dict]:
     """Send one page image to Claude and return the list of structured tables."""
-    messages = [
+    content_blocks = [
         {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": image_b64,
-                    },
-                },
-                {"type": "text", "text": EXTRACTION_PROMPT},
-            ],
-        }
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": image_b64,
+            },
+        },
+        {"type": "text", "text": EXTRACTION_PROMPT},
     ]
 
-    last_err: Optional[Exception] = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            # Streaming avoids request timeouts on dense pages with large tables.
-            # thinking=adaptive improves transcription accuracy; tool_choice stays
-            # "auto" because forced tool use is incompatible with extended thinking.
-            with client.messages.stream(
-                model=MODEL,
-                max_tokens=16000,
-                thinking={"type": "adaptive"},
-                tools=[RECORD_TOOL],
-                messages=messages,
-            ) as stream:
-                final = stream.get_final_message()
-            return _tables_from_message(final, page_num, pdf_filename)
-        except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
-            last_err = e
-            wait = 2 ** attempt
-            print(f"    [retry {attempt + 1}/{MAX_RETRIES}] {type(e).__name__}; waiting {wait}s")
-            time.sleep(wait)
+    try:
+        response = call_claude(api_key, content_blocks)
+    except RuntimeError as e:
+        print(f"    [error] page {page_num + 1} failed: {e}")
+        return []
 
-    print(f"    [error] page {page_num + 1} failed after {MAX_RETRIES} attempts: {last_err}")
-    return []
+    if response.get("stop_reason") == "refusal":
+        print(f"    [warn] page {page_num + 1}: request was declined by safety filter; skipping.")
+        return []
+
+    return _tables_from_response(response, page_num, pdf_filename)
 
 
-def _tables_from_message(message, page_num: int, pdf_filename: str) -> list[dict]:
-    """Pull the record_tables tool input out of a finished message."""
+def _tables_from_response(response: dict, page_num: int, pdf_filename: str) -> list[dict]:
+    """Pull the record_tables tool input out of a response payload."""
     tables: list[dict] = []
-    for block in message.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == "record_tables":
-            tables = list(block.input.get("tables", []))
+    content = response.get("content", [])
+    for block in content:
+        if block.get("type") == "tool_use" and block.get("name") == "record_tables":
+            tables = list(block.get("input", {}).get("tables", []))
             break
     else:
         # Fallback: model answered in prose JSON instead of calling the tool.
-        text = "".join(
-            b.text for b in message.content if getattr(b, "type", None) == "text"
-        )
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
         tables = _salvage_json_tables(text)
 
     for t in tables:
@@ -272,7 +312,6 @@ def stitch_continuations(tables: list[dict]) -> list[dict]:
         )
         if can_merge:
             prev["rows"].extend(t.get("rows", []))
-            # Carry footnotes forward and update where the table now ends.
             prev["footnotes"] = prev.get("footnotes", []) + t.get("footnotes", [])
             prev["continues_on_next"] = t.get("continues_on_next", False)
             prev.setdefault("spans_pages", [prev.get("page_number")])
@@ -385,7 +424,7 @@ def write_manifest(all_tables: list[dict], output_dir: Path, pdf_stem: str) -> s
     return str(filepath)
 
 
-def process_pdf(pdf_path: Path, output_root: Path, client: anthropic.Anthropic) -> int:
+def process_pdf(pdf_path: Path, output_root: Path, api_key: str) -> int:
     """Extract all tables from one PDF. Returns the number of tables written."""
     pdf_filename = pdf_path.name
     pdf_stem = pdf_path.stem
@@ -402,7 +441,7 @@ def process_pdf(pdf_path: Path, output_root: Path, client: anthropic.Anthropic) 
     for page_num in range(total_pages):
         print(f"  Page {page_num + 1}/{total_pages}...", end=" ", flush=True)
         image_b64 = pdf_page_to_base64(doc[page_num])
-        tables = extract_tables_from_page(client, image_b64, page_num, pdf_filename)
+        tables = extract_tables_from_page(api_key, image_b64, page_num, pdf_filename)
         print(f"found {len(tables)} table(s)" if tables else "no tables")
         page_tables.extend(tables)
     doc.close()
@@ -463,9 +502,10 @@ def main():
 
     api_key = os.environ.get("ANTHROPIC_API_KEY") or input(
         "Enter your Anthropic API key: ").strip()
-    client = anthropic.Anthropic(api_key=api_key)
+    if not api_key:
+        sys.exit("Error: no API key provided.")
 
-    total = sum(process_pdf(p, output_dir, client) for p in pdf_files)
+    total = sum(process_pdf(p, output_dir, api_key) for p in pdf_files)
 
     print(f"\n{'=' * 60}\nExtraction complete.")
     print(f"Total tables extracted: {total}")
