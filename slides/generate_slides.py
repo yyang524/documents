@@ -88,7 +88,8 @@ def header(s, kicker, title, title_color=INK):
     _, tf = tb(s, ML, Inches(0.78), CW, Inches(0.62))
     para(tf, title, size=26, color=title_color, bold=True, first=True)
 
-def footer(s, n):
+def footer(s):
+    n = len(prs.slides._sldIdLst)
     _, tf = tb(s, ML, Inches(7.12), Inches(8), Inches(0.3))
     para(tf, "AI document comparison · IMF Policy Note vs Staff Report", size=9, color=MUTED, first=True)
     _, tf = tb(s, SW - Inches(1.1), Inches(7.12), Inches(0.5), Inches(0.3))
@@ -210,7 +211,7 @@ para(tf, "Read as an expert IMF economist would — not as a text diff.", size=1
 strip(s, Inches(6.15), [("“ALL” makes this a ", {}),
                         ("recall problem", {"bold": True}),
                         (", not a summarization problem — and exhaustive recall is exactly where LLMs are weakest.", {})])
-footer(s, 2)
+footer(s)
 
 # ================================================================ SLIDE 3
 s = slide_new()
@@ -280,7 +281,7 @@ card(s, rx, Inches(4.49), rw, Inches(1.26), BLUE,
 _, tf = tb(s, ML, Inches(5.98), CW, Inches(0.6))
 para(tf, "Microsoft's own guidance: on long files Copilot may focus on the beginning and ignore later content — split long documents and review them in parts.",
      size=11.5, color=MUTED, italic=True, first=True)
-footer(s, 3)
+footer(s)
 
 # ================================================================ SLIDE 4
 s = slide_new()
@@ -319,7 +320,69 @@ card(s, ML + Inches(6.15), cy4, Inches(5.9), ch4, RED, "Observed in practice",
 
 strip(s, Inches(5.75), [("No end-to-end reading ", {"bold": True}),
                         ("→ a footnote that contradicts a claim 60 pages later is structurally invisible to the model.", {})])
-footer(s, 4)
+footer(s)
+
+# ================================================================ SLIDE 4b — chat conversation memory
+s = slide_new()
+header(s, "Under the hood · 2", "The obvious workaround fails: the chat window forgets")
+
+_, tf = tb(s, ML, Inches(1.56), CW, Inches(0.35))
+para(tf, "The tempting fix for truncation — split the PDFs yourself and feed the pieces through one chat, then ask:",
+     size=13, color=SECOND, first=True)
+
+# chunk row: 8 chunks fed one turn at a time; only the last 5 stay in memory
+ry = Inches(2.32); rh5 = Inches(0.6)
+cwid = Inches(0.92); pitch5 = Inches(1.12)
+N_CH = 8; KEEP_FROM = 3          # chunks 0-2 evicted, 3-7 retained
+for i in range(N_CH):
+    x = ML + pitch5 * i
+    if i < KEEP_FROM:
+        sp, tf = box(s, x, ry, cwid, rh5, fill=BAND, line_c=MUTED, line_w=1.0)
+        ln = sp.line._get_or_add_ln()
+        ln.append(ln.makeelement(qn('a:prstDash'), {'val': 'dash'}))
+        tcol = MUTED
+    else:
+        sp, tf = box(s, x, ry, cwid, rh5, fill=BLUE, line_c=None)
+        tcol = WHITE
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tf.margin_left = tf.margin_right = Inches(0.02)
+    para(tf, f"chunk {i+1}", size=10.5, color=tcol, bold=True, first=True, align=PP_ALIGN.CENTER)
+
+# memory window bracket around retained chunks
+wx = ML + pitch5 * KEEP_FROM - Inches(0.09)
+ww = pitch5 * (N_CH - 1 - KEEP_FROM) + cwid + Inches(0.18)
+win, _ = box(s, wx, ry - Inches(0.13), ww, rh5 + Inches(0.26), fill=None, line_c=BLUE_D, line_w=1.75, radius=0.12)
+ln = win.line._get_or_add_ln()
+ln.append(ln.makeelement(qn('a:prstDash'), {'val': 'dash'}))
+_, tf = tb(s, wx, ry - Inches(0.48), ww, Inches(0.3))
+para(tf, "conversation memory — fixed size", size=10.5, color=BLUE_D, bold=True, first=True, align=PP_ALIGN.CENTER)
+_, tf = tb(s, ML, ry + rh5 + Inches(0.18), pitch5 * 2 + cwid, Inches(0.3))
+para(tf, "evicted — no longer available", size=10.5, color=RED_D, bold=True, first=True, align=PP_ALIGN.CENTER)
+
+# question -> confident partial answer
+qy = Inches(3.62); qh = Inches(0.62)
+sp, tf = box(s, ML, qy, Inches(4.7), qh, fill=BAND, line_c=HAIRLINE)
+tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+para(tf, "“Now list ALL cross-document inconsistencies.”", size=12.5, color=INK, italic=True, first=True)
+arrow(s, ML + Inches(4.82), qy + Inches(0.31), ML + Inches(5.5), qy + Inches(0.31), color=SECOND, w=1.75)
+sp, tf = box(s, ML + Inches(5.62), qy, CW - Inches(5.62), qh, fill=CARD, line_c=RED, line_w=1.5)
+tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+para(tf, [("Fluent, confident answer — built only on chunks 4–8. ", {"color": INK}),
+          ("Nothing signals that chunks 1–3 are gone.", {"color": RED_D, "bold": True})],
+     size=12.5, first=True)
+
+# why this is its own problem
+cy5b = Inches(4.62); ch5b = Inches(1.32)
+card(s, ML, cy5b, Inches(5.9), ch5b, VIOLET, "Not the attention problem from earlier",
+     ["Attention = how unevenly the model reads what is in front of it. Memory = whether earlier content is in front of it at all. Fixing one doesn’t fix the other."],
+     body_size=12)
+card(s, ML + Inches(6.15), cy5b, Inches(5.9), ch5b, RED_D, "Everything you accumulate decays too",
+     ["Your findings list, coverage checklist and “do not skip” rules live in the same finite window — and one drifted or dead session loses all of it."],
+     body_size=12)
+
+strip(s, Inches(6.18), [("If state can’t live in the conversation, it must live outside it — in files. ", {"bold": True}),
+                        ("That constraint drives the whole design of Approach 2.", {})])
+footer(s)
 
 # ================================================================ SLIDE 5
 s = slide_new()
@@ -362,7 +425,7 @@ para(tf, [("Source of the risk:  ", {"color": MUTED}),
           ("MODEL", {"color": VIOLET, "bold": True}), (" = inherent to LLMs   ", {"color": MUTED}),
           ("PLATFORM", {"color": YELLOW_D, "bold": True}), (" = Copilot product layer   ", {"color": MUTED}),
           ("BOTH", {"color": RED_D, "bold": True})], size=10.5, first=True)
-footer(s, 5)
+footer(s)
 
 # ================================================================ SLIDE 6
 s = slide_new()
@@ -388,7 +451,7 @@ para(tf, "Dangerous — silent and expensive", size=12.5, color=RED_D, italic=Tr
 strip(s, Inches(5.3), [("Design choice: ", {"bold": True}),
                        ("tune the AI first pass for high recall (accept extra false positives) → human expert review restores precision.", {})],
       h=Inches(0.85))
-footer(s, 6)
+footer(s)
 
 # ================================================================ SLIDE 7
 s = slide_new()
@@ -428,7 +491,7 @@ for num, t, b in reasons:
 strip(s, Inches(5.65), [("Result: ", {"bold": True}),
                         ("a fluent, confident memo built on the most salient ~30% of the documents — a smart skimmer with no audit trail.", {})],
       fill=RED_D)
-footer(s, 7)
+footer(s)
 
 # ================================================================ SLIDE 8
 s = slide_new()
@@ -477,7 +540,7 @@ for i, fl in enumerate(file_labels):
 
 strip(s, Inches(5.95), [("Files carry the state, not the conversation ", {"bold": True}),
                         ("— each stage starts a fresh, small chat context; a crashed or drifting session costs one step, not the whole run.", {})])
-footer(s, 8)
+footer(s)
 
 # ================================================================ SLIDE 9
 s = slide_new()
@@ -494,7 +557,7 @@ gy = [Inches(1.8), Inches(4.15)]
 gw, gh = Inches(5.9), Inches(2.15)
 for i, (t, b, c) in enumerate(pr9):
     card(s, gx[i % 2], gy[i // 2], gw, gh, c, f"{i+1}.  {t}", [b], title_size=15, body_size=13)
-footer(s, 9)
+footer(s)
 
 # ================================================================ SLIDE 10
 s = slide_new()
@@ -531,7 +594,7 @@ for i, (dim, a, b) in enumerate(rows10):
 
 strip(s, Inches(6.35), [("The pipeline turns an opaque, convenience-oriented process into a controlled, auditable QC workflow.", {"bold": True})],
       h=Inches(0.55), fill=BLUE_DD)
-footer(s, 10)
+footer(s)
 
 # ================================================================ SLIDE 11
 s = slide_new()
@@ -555,7 +618,7 @@ for t, b, tail in lim:
 strip(s, Inches(5.55), [("The final control is unchanged: an expert economist. ", {"bold": True}),
                         ("AI widens recall; the human supplies judgment and precision.", {})],
       fill=AQUA_D, h=Inches(0.85))
-footer(s, 11)
+footer(s)
 
 # ================================================================ SLIDE 12
 s = slide_new()
@@ -571,7 +634,7 @@ gx = [ML, ML + Inches(6.15)]
 gy = [Inches(1.8), Inches(4.15)]
 for i, (t, b, c) in enumerate(fn):
     card(s, gx[i % 2], gy[i // 2], Inches(5.9), Inches(2.15), c, t, [b], title_size=15, body_size=13)
-footer(s, 12)
+footer(s)
 
 # ================================================================ SLIDE 13
 s = slide_new()
@@ -598,7 +661,7 @@ for i, (t, b) in enumerate(tk):
     _, tf = tb(s, ML + Inches(0.85), y - Inches(0.05), CW - Inches(0.85), Inches(1.1))
     para(tf, t, size=17, color=INK, bold=True, first=True, space_after=2)
     para(tf, b, size=13.5, color=SECOND)
-footer(s, 13)
+footer(s)
 
 # strip theme style refs (fillRef/effectRef) so no inherited shadows render
 for slide in prs.slides:
