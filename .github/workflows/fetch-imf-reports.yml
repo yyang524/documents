@@ -1,0 +1,95 @@
+name: Fetch IMF Saudi Arabia reports
+
+# Downloads public IMF Article IV staff reports for Saudi Arabia (and the
+# Oct-2020 MCD Regional Economic Outlook) into data/imf_reports/ and commits
+# them back to this branch. Needed because the Claude Code session container
+# cannot reach imf.org directly.
+
+on:
+  push:
+    branches: [claude/saudi-nongdp-projections-3cdow2]
+    paths: ['.github/workflows/fetch-imf-reports.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download IMF reports
+        run: |
+          set -u
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          mkdir -p data/imf_reports
+          : > data/imf_reports/log.txt
+
+          fetch() {
+            out="data/imf_reports/$1"; shift
+            if [ -s "$out" ]; then echo "SKIP $out (exists)" >> data/imf_reports/log.txt; return 0; fi
+            for u in "$@"; do
+              if curl -fsSL --retry 2 --max-time 180 -A "$UA" -o "$out" "$u" \
+                 && [ "$(head -c 4 "$out")" = "%PDF" ]; then
+                echo "OK   $out <- $u" >> data/imf_reports/log.txt
+                return 0
+              fi
+              rm -f "$out"
+            done
+            echo "FAIL $out (all candidate URLs failed)" >> data/imf_reports/log.txt
+            return 0
+          }
+
+          fetch imf_sau_artiv_2016_cr16326.pdf \
+            "https://www.imf.org/external/pubs/ft/scr/2016/cr16326.pdf"
+
+          fetch imf_sau_artiv_2017_cr17316.pdf \
+            "https://www.imf.org/external/pubs/ft/scr/2017/cr17316.pdf" \
+            "https://www.imf.org/-/media/Files/Publications/CR/2017/cr17316.ashx"
+
+          fetch imf_sau_artiv_2018_cr18263.pdf \
+            "https://www.imf.org/-/media/files/publications/cr/2018/cr18263-sa.pdf" \
+            "https://www.imf.org/-/media/Files/Publications/CR/2018/cr18263-SA.ashx"
+
+          fetch imf_sau_artiv_2019_cr19290.pdf \
+            "https://www.imf.org/-/media/Files/Publications/CR/2019/1SAUEA2019001.ashx" \
+            "https://www.imf.org/~/media/Files/Publications/CR/2019/1SAUEA2019001.ashx"
+
+          fetch imf_sau_artiv_2021_cr21149.pdf \
+            "https://www.imf.org/-/media/files/publications/cr/2021/english/1sauea2021001.pdf"
+
+          fetch imf_sau_artiv_2022_cr22274.pdf \
+            "https://www.imf.org/-/media/Files/Publications/CR/2022/English/1SAUEA2022001.ashx" \
+            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2022/274/002.2022.issue-274-en.pdf"
+
+          fetch imf_sau_artiv_2023_cr23323.pdf \
+            "https://www.imf.org/-/media/Files/Publications/CR/2023/English/1SAUEA2023001.ashx" \
+            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2023/323/002.2023.issue-323-en.pdf"
+
+          fetch imf_sau_artiv_2024_cr24280.pdf \
+            "https://www.imf.org/-/media/Files/Publications/CR/2024/English/1SAUEA2024001.ashx" \
+            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2024/280/002.2024.issue-280-en.pdf"
+
+          fetch imf_sau_artiv_2025_cr25223.pdf \
+            "https://www.imf.org/-/media/files/publications/cr/2025/english/1sauea2025001-source-pdf.pdf" \
+            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2025/223/002.2025.issue-223-en.pdf"
+
+          fetch imf_mcd_reo_oct2020_statistical_appendix.pdf \
+            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/statistical-appendix.ashx" \
+            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/stat-appendix.ashx"
+
+          fetch imf_mcd_reo_oct2020_full.pdf \
+            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx" \
+            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo.ashx"
+
+          cat data/imf_reports/log.txt
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/imf_reports
+          git commit -m "Add IMF Saudi Arabia report PDFs fetched by workflow [skip ci]" || echo "nothing to commit"
+          git push
