@@ -20,70 +20,109 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download IMF reports
+      - name: Write target list
+        run: |
+          mkdir -p data/imf_reports
+          cat > /tmp/targets.txt <<'EOF'
+          imf_sau_artiv_2016_cr16326.pdf|https://www.imf.org/external/pubs/ft/scr/2016/cr16326.pdf
+          imf_sau_artiv_2017_cr17316.pdf|https://www.imf.org/external/pubs/ft/scr/2017/cr17316.pdf|https://www.imf.org/-/media/Files/Publications/CR/2017/cr17316.ashx
+          imf_sau_artiv_2018_cr18263.pdf|https://www.imf.org/-/media/files/publications/cr/2018/cr18263-sa.pdf|https://www.imf.org/-/media/Files/Publications/CR/2018/cr18263-SA.ashx
+          imf_sau_artiv_2019_cr19290.pdf|https://www.imf.org/-/media/Files/Publications/CR/2019/1SAUEA2019001.ashx
+          imf_sau_artiv_2021_cr21149.pdf|https://www.imf.org/-/media/files/publications/cr/2021/english/1sauea2021001.pdf
+          imf_sau_artiv_2022_cr22274.pdf|https://www.imf.org/-/media/Files/Publications/CR/2022/English/1SAUEA2022001.ashx|https://www.elibrary.imf.org/downloadpdf/view/journals/002/2022/274/002.2022.issue-274-en.pdf
+          imf_sau_artiv_2023_cr23323.pdf|https://www.imf.org/-/media/Files/Publications/CR/2023/English/1SAUEA2023001.ashx|https://www.elibrary.imf.org/downloadpdf/view/journals/002/2023/323/002.2023.issue-323-en.pdf
+          imf_sau_artiv_2024_cr24280.pdf|https://www.imf.org/-/media/Files/Publications/CR/2024/English/1SAUEA2024001.ashx|https://www.elibrary.imf.org/downloadpdf/view/journals/002/2024/280/002.2024.issue-280-en.pdf
+          imf_sau_artiv_2025_cr25223.pdf|https://www.imf.org/-/media/files/publications/cr/2025/english/1sauea2025001-source-pdf.pdf|https://www.elibrary.imf.org/downloadpdf/view/journals/002/2025/223/002.2025.issue-223-en.pdf
+          imf_mcd_reo_oct2020_full.pdf|https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx|https://www.imf.org/~/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx
+          EOF
+
+      - name: Try curl with browser headers
         run: |
           set -u
-          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-          mkdir -p data/imf_reports
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
           : > data/imf_reports/log.txt
-
-          fetch() {
-            out="data/imf_reports/$1"; shift
-            if [ -s "$out" ]; then echo "SKIP $out (exists)" >> data/imf_reports/log.txt; return 0; fi
-            for u in "$@"; do
-              if curl -fsSL --retry 2 --max-time 180 -A "$UA" -o "$out" "$u" \
-                 && [ "$(head -c 4 "$out")" = "%PDF" ]; then
-                echo "OK   $out <- $u" >> data/imf_reports/log.txt
-                return 0
+          while IFS='|' read -r name rest; do
+            name="$(echo "$name" | xargs)"; [ -z "$name" ] && continue
+            out="data/imf_reports/$name"
+            [ -s "$out" ] && { echo "SKIP $name" >> data/imf_reports/log.txt; continue; }
+            IFS='|' read -ra urls <<< "$rest"
+            for u in "${urls[@]}"; do
+              code=$(curl -sSL --retry 2 --max-time 180 -A "$UA" \
+                -H "Accept: text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8" \
+                -H "Accept-Language: en-US,en;q=0.9" \
+                -H "Referer: https://www.imf.org/en/countries/sau" \
+                -o "$out" -w "%{http_code}" "$u" || echo "ERR")
+              if [ -s "$out" ] && [ "$(head -c 4 "$out")" = "%PDF" ]; then
+                echo "OK(curl:$code) $name <- $u" >> data/imf_reports/log.txt
+                break
               fi
+              snippet=""
+              [ -f "$out" ] && snippet="$(head -c 120 "$out" | tr -d '\n\r')"
+              echo "MISS(curl:$code) $name <- $u :: $snippet" >> data/imf_reports/log.txt
               rm -f "$out"
             done
-            echo "FAIL $out (all candidate URLs failed)" >> data/imf_reports/log.txt
-            return 0
-          }
+          done < /tmp/targets.txt
+          cat data/imf_reports/log.txt
 
-          fetch imf_sau_artiv_2016_cr16326.pdf \
-            "https://www.imf.org/external/pubs/ft/scr/2016/cr16326.pdf"
+      - name: Playwright fallback for missing files
+        run: |
+          pip install playwright >/dev/null 2>&1
+          python -m playwright install chromium --with-deps >/dev/null 2>&1
+          python3 <<'PYEOF'
+          import os
+          from playwright.sync_api import sync_playwright
 
-          fetch imf_sau_artiv_2017_cr17316.pdf \
-            "https://www.imf.org/external/pubs/ft/scr/2017/cr17316.pdf" \
-            "https://www.imf.org/-/media/Files/Publications/CR/2017/cr17316.ashx"
+          targets = []
+          for line in open('/tmp/targets.txt'):
+              parts = [p.strip() for p in line.strip().split('|') if p.strip()]
+              if len(parts) >= 2:
+                  targets.append((parts[0], parts[1:]))
 
-          fetch imf_sau_artiv_2018_cr18263.pdf \
-            "https://www.imf.org/-/media/files/publications/cr/2018/cr18263-sa.pdf" \
-            "https://www.imf.org/-/media/Files/Publications/CR/2018/cr18263-SA.ashx"
-
-          fetch imf_sau_artiv_2019_cr19290.pdf \
-            "https://www.imf.org/-/media/Files/Publications/CR/2019/1SAUEA2019001.ashx" \
-            "https://www.imf.org/~/media/Files/Publications/CR/2019/1SAUEA2019001.ashx"
-
-          fetch imf_sau_artiv_2021_cr21149.pdf \
-            "https://www.imf.org/-/media/files/publications/cr/2021/english/1sauea2021001.pdf"
-
-          fetch imf_sau_artiv_2022_cr22274.pdf \
-            "https://www.imf.org/-/media/Files/Publications/CR/2022/English/1SAUEA2022001.ashx" \
-            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2022/274/002.2022.issue-274-en.pdf"
-
-          fetch imf_sau_artiv_2023_cr23323.pdf \
-            "https://www.imf.org/-/media/Files/Publications/CR/2023/English/1SAUEA2023001.ashx" \
-            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2023/323/002.2023.issue-323-en.pdf"
-
-          fetch imf_sau_artiv_2024_cr24280.pdf \
-            "https://www.imf.org/-/media/Files/Publications/CR/2024/English/1SAUEA2024001.ashx" \
-            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2024/280/002.2024.issue-280-en.pdf"
-
-          fetch imf_sau_artiv_2025_cr25223.pdf \
-            "https://www.imf.org/-/media/files/publications/cr/2025/english/1sauea2025001-source-pdf.pdf" \
-            "https://www.elibrary.imf.org/downloadpdf/view/journals/002/2025/223/002.2025.issue-223-en.pdf"
-
-          fetch imf_mcd_reo_oct2020_statistical_appendix.pdf \
-            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/statistical-appendix.ashx" \
-            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/stat-appendix.ashx"
-
-          fetch imf_mcd_reo_oct2020_full.pdf \
-            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx" \
-            "https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo.ashx"
-
+          log = open('data/imf_reports/log.txt', 'a')
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              ctx = browser.new_context(
+                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                  accept_downloads=True)
+              page = ctx.new_page()
+              # visit landing page once to collect cookies
+              try:
+                  page.goto("https://www.imf.org/en/countries/sau", timeout=60000)
+              except Exception:
+                  pass
+              for name, urls in targets:
+                  out = f"data/imf_reports/{name}"
+                  if os.path.exists(out) and os.path.getsize(out) > 0:
+                      continue
+                  for u in urls:
+                      try:
+                          r = ctx.request.get(u, timeout=180000)
+                          body = r.body()
+                          if r.ok and body[:4] == b'%PDF':
+                              open(out, 'wb').write(body)
+                              log.write(f"OK(pw-req:{r.status}) {name} <- {u}\n")
+                              break
+                          log.write(f"MISS(pw-req:{r.status}) {name} <- {u} :: {body[:100]!r}\n")
+                          # try navigating (handles JS challenges / downloads)
+                          try:
+                              with page.expect_download(timeout=60000) as dl_info:
+                                  try:
+                                      page.goto(u, timeout=60000)
+                                  except Exception:
+                                      pass
+                              dl_info.value.save_as(out)
+                              with open(out, 'rb') as f:
+                                  if f.read(4) == b'%PDF':
+                                      log.write(f"OK(pw-dl) {name} <- {u}\n")
+                                      break
+                              os.remove(out)
+                          except Exception as e:
+                              log.write(f"MISS(pw-dl) {name} <- {u} :: {type(e).__name__}\n")
+                      except Exception as e:
+                          log.write(f"MISS(pw-req) {name} <- {u} :: {type(e).__name__}: {e}\n")
+              browser.close()
+          log.close()
+          PYEOF
           cat data/imf_reports/log.txt
 
       - name: Commit results
@@ -91,5 +130,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/imf_reports
-          git commit -m "Add IMF Saudi Arabia report PDFs fetched by workflow [skip ci]" || echo "nothing to commit"
+          git commit -m "Fetch IMF Saudi Arabia report PDFs via workflow [skip ci]" || echo "nothing to commit"
+          git pull --rebase origin claude/saudi-nongdp-projections-3cdow2 || true
           git push
