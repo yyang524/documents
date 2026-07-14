@@ -1,11 +1,33 @@
-FAIL data/imf_reports/imf_sau_artiv_2016_cr16326.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2017_cr17316.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2018_cr18263.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2019_cr19290.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2021_cr21149.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2022_cr22274.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2023_cr23323.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2024_cr24280.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_sau_artiv_2025_cr25223.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_mcd_reo_oct2020_statistical_appendix.pdf (all candidate URLs failed)
-FAIL data/imf_reports/imf_mcd_reo_oct2020_full.pdf (all candidate URLs failed)
+MISS(curl:403) imf_sau_artiv_2016_cr16326.pdf <- https://www.imf.org/external/pubs/ft/scr/2016/cr16326.pdf :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2017_cr17316.pdf <- https://www.imf.org/external/pubs/ft/scr/2017/cr17316.pdf :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2017_cr17316.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2017/cr17316.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2018_cr18263.pdf <- https://www.imf.org/-/media/files/publications/cr/2018/cr18263-sa.pdf :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2018_cr18263.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2018/cr18263-SA.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2019_cr19290.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2019/1SAUEA2019001.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2021_cr21149.pdf <- https://www.imf.org/-/media/files/publications/cr/2021/english/1sauea2021001.pdf :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_sau_artiv_2022_cr22274.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2022/English/1SAUEA2022001.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+OK(curl:200) imf_sau_artiv_2022_cr22274.pdf <- https://www.elibrary.imf.org/downloadpdf/view/journals/002/2022/274/002.2022.issue-274-en.pdf
+MISS(curl:403) imf_sau_artiv_2023_cr23323.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2023/English/1SAUEA2023001.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+OK(curl:200) imf_sau_artiv_2023_cr23323.pdf <- https://www.elibrary.imf.org/downloadpdf/view/journals/002/2023/323/002.2023.issue-323-en.pdf
+MISS(curl:403) imf_sau_artiv_2024_cr24280.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2024/English/1SAUEA2024001.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+OK(curl:200) imf_sau_artiv_2024_cr24280.pdf <- https://www.elibrary.imf.org/downloadpdf/view/journals/002/2024/280/002.2024.issue-280-en.pdf
+MISS(curl:403) imf_sau_artiv_2025_cr25223.pdf <- https://www.imf.org/-/media/files/publications/cr/2025/english/1sauea2025001-source-pdf.pdf :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+OK(curl:200) imf_sau_artiv_2025_cr25223.pdf <- https://www.elibrary.imf.org/downloadpdf/view/journals/002/2025/223/002.2025.issue-223-en.pdf
+MISS(curl:403) imf_mcd_reo_oct2020_full.pdf <- https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(curl:403) imf_mcd_reo_oct2020_full.pdf <- https://www.imf.org/~/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx :: <HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY><H1>Access Denied</H1> You don't have permission to access "ht
+MISS(pw-req:403) imf_sau_artiv_2016_cr16326.pdf <- https://www.imf.org/external/pubs/ft/scr/2016/cr16326.pdf :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+OK(pw-dl) imf_sau_artiv_2016_cr16326.pdf <- https://www.imf.org/external/pubs/ft/scr/2016/cr16326.pdf
+MISS(pw-req:403) imf_sau_artiv_2017_cr17316.pdf <- https://www.imf.org/external/pubs/ft/scr/2017/cr17316.pdf :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+MISS(pw-dl) imf_sau_artiv_2017_cr17316.pdf <- https://www.imf.org/external/pubs/ft/scr/2017/cr17316.pdf :: TimeoutError
+MISS(pw-req:403) imf_sau_artiv_2017_cr17316.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2017/cr17316.ashx :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+OK(pw-dl) imf_sau_artiv_2017_cr17316.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2017/cr17316.ashx
+MISS(pw-req:403) imf_sau_artiv_2018_cr18263.pdf <- https://www.imf.org/-/media/files/publications/cr/2018/cr18263-sa.pdf :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+OK(pw-dl) imf_sau_artiv_2018_cr18263.pdf <- https://www.imf.org/-/media/files/publications/cr/2018/cr18263-sa.pdf
+MISS(pw-req:403) imf_sau_artiv_2019_cr19290.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2019/1SAUEA2019001.ashx :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+OK(pw-dl) imf_sau_artiv_2019_cr19290.pdf <- https://www.imf.org/-/media/Files/Publications/CR/2019/1SAUEA2019001.ashx
+MISS(pw-req:403) imf_sau_artiv_2021_cr21149.pdf <- https://www.imf.org/-/media/files/publications/cr/2021/english/1sauea2021001.pdf :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+OK(pw-dl) imf_sau_artiv_2021_cr21149.pdf <- https://www.imf.org/-/media/files/publications/cr/2021/english/1sauea2021001.pdf
+MISS(pw-req:403) imf_mcd_reo_oct2020_full.pdf <- https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+MISS(pw-dl) imf_mcd_reo_oct2020_full.pdf <- https://www.imf.org/-/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx :: TimeoutError
+MISS(pw-req:403) imf_mcd_reo_oct2020_full.pdf <- https://www.imf.org/~/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx :: b"<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have perm"
+MISS(pw-dl) imf_mcd_reo_oct2020_full.pdf <- https://www.imf.org/~/media/Files/Publications/REO/MCD-CCA/2020/October/English/mcd-reo-full-report.ashx :: TimeoutError
